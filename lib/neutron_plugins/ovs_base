@@ -38,7 +38,14 @@ function _neutron_ovs_base_install_agent_packages {
     # FIXME add to ``files/apts/neutron``, but don't install if not needed!
     if is_ubuntu; then
         kernel_version=`cat /proc/version | cut -d " " -f3`
-        install_package make fakeroot dkms openvswitch-switch openvswitch-datapath-dkms linux-headers-$kernel_version
+        ovs_packages="make fakeroot dkms openvswitch-switch"
+        # From kernel 3.13 on, openvswitch-datapath-dkms is not needed
+        kernel_major_minor=`echo $kernel_version | cut -d. -f1-2`
+        if [ `vercmp_numbers "$kernel_major_minor" "3.13"` -lt "0" ]; then
+            ovs_packages="$ovs_packages openvswitch-datapath-dkms"
+        fi
+        ovs_packages="$ovs_packages linux-headers-$kernel_version"
+        install_package $ovs_packages
     elif is_fedora; then
         install_package openvswitch
         # Ensure that the service is started
@@ -65,8 +72,9 @@ function _neutron_ovs_base_configure_l3_agent {
     iniset $Q_L3_CONF_FILE DEFAULT external_network_bridge $PUBLIC_BRIDGE
 
     neutron-ovs-cleanup
-    sudo ovs-vsctl --no-wait -- --may-exist add-br $PUBLIC_BRIDGE
-    sudo ovs-vsctl --no-wait br-set-external-id $PUBLIC_BRIDGE bridge-id $PUBLIC_BRIDGE
+    # --no-wait causes a race condition if $PUBLIC_BRIDGE is not up when ip addr flush is called
+    sudo ovs-vsctl -- --may-exist add-br $PUBLIC_BRIDGE
+    sudo ovs-vsctl br-set-external-id $PUBLIC_BRIDGE bridge-id $PUBLIC_BRIDGE
     # ensure no IP is configured on the public bridge
     sudo ip addr flush dev $PUBLIC_BRIDGE
 }

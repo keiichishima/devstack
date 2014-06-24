@@ -162,11 +162,9 @@ function configure_ironic {
 function configure_ironic_api {
     iniset $IRONIC_CONF_FILE DEFAULT auth_strategy keystone
     iniset $IRONIC_CONF_FILE DEFAULT policy_file $IRONIC_POLICY_JSON
-    iniset $IRONIC_CONF_FILE keystone_authtoken auth_host $KEYSTONE_AUTH_HOST
-    iniset $IRONIC_CONF_FILE keystone_authtoken auth_port $KEYSTONE_AUTH_PORT
-    iniset $IRONIC_CONF_FILE keystone_authtoken auth_protocol $KEYSTONE_AUTH_PROTOCOL
+    iniset $IRONIC_CONF_FILE keystone_authtoken identity_uri $KEYSTONE_AUTH_URI
     iniset $IRONIC_CONF_FILE keystone_authtoken cafile $KEYSTONE_SSL_CA
-    iniset $IRONIC_CONF_FILE keystone_authtoken auth_uri $KEYSTONE_SERVICE_PROTOCOL://$KEYSTONE_SERVICE_HOST:$KEYSTONE_SERVICE_PORT/
+    iniset $IRONIC_CONF_FILE keystone_authtoken auth_uri $KEYSTONE_SERVICE_URI
     iniset $IRONIC_CONF_FILE keystone_authtoken admin_tenant_name $SERVICE_TENANT_NAME
     iniset $IRONIC_CONF_FILE keystone_authtoken admin_user ironic
     iniset $IRONIC_CONF_FILE keystone_authtoken admin_password $SERVICE_PASSWORD
@@ -258,7 +256,7 @@ function init_ironic {
     recreate_database ironic utf8
 
     # Migrate ironic database
-    $IRONIC_BIN_DIR/ironic-dbsync
+    $IRONIC_BIN_DIR/ironic-dbsync --config-file=$IRONIC_CONF_FILE
 
     create_ironic_cache_dir
 }
@@ -357,6 +355,8 @@ function enroll_vms {
     while read MAC; do
 
         NODE_ID=$(ironic node-create --chassis_uuid $CHASSIS_ID --driver pxe_ssh \
+            -i pxe_deploy_kernel=$IRONIC_DEPLOY_KERNEL_ID \
+            -i pxe_deploy_ramdisk=$IRONIC_DEPLOY_RAMDISK_ID \
             -i ssh_virt_type=$IRONIC_SSH_VIRT_TYPE \
             -i ssh_address=$IRONIC_VM_SSH_ADDRESS \
             -i ssh_port=$IRONIC_VM_SSH_PORT \
@@ -377,6 +377,10 @@ function enroll_vms {
     # create the nova flavor
     adjusted_disk=$(($IRONIC_VM_SPECS_DISK - $IRONIC_VM_EPHEMERAL_DISK))
     nova flavor-create --ephemeral $IRONIC_VM_EPHEMERAL_DISK baremetal auto $IRONIC_VM_SPECS_RAM $adjusted_disk $IRONIC_VM_SPECS_CPU
+    # TODO(lucasagomes): Remove the 'baremetal:deploy_kernel_id'
+    # and 'baremetal:deploy_ramdisk_id' parameters
+    # from the flavor after the completion of
+    # https://blueprints.launchpad.net/ironic/+spec/add-node-instance-info
     nova flavor-key baremetal set "cpu_arch"="x86_64" "baremetal:deploy_kernel_id"="$IRONIC_DEPLOY_KERNEL_ID" "baremetal:deploy_ramdisk_id"="$IRONIC_DEPLOY_RAMDISK_ID"
 
     # intentional sleep to make sure the tag has been set to port

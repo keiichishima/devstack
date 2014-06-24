@@ -246,7 +246,12 @@ if [[ is_fedora && $DISTRO =~ (rhel) ]]; then
 
     # ... and also optional to be enabled
     is_package_installed yum-utils || install_package yum-utils
-    sudo yum-config-manager --enable rhel-6-server-optional-rpms
+    if [[ $DISTRO =~ (rhel7) ]]; then
+        OPTIONAL_REPO=rhel-7-server-optional-rpms
+    else
+        OPTIONAL_REPO=rhel-6-server-optional-rpms
+    fi
+    sudo yum-config-manager --enable ${OPTIONAL_REPO}
 
 fi
 
@@ -548,25 +553,14 @@ if [[ -n "$LOGFILE" ]]; then
     exec 3>&1
     if [[ "$VERBOSE" == "True" ]]; then
         # Set fd 1 and 2 to write the log file
-        exec 1> >( awk -v logfile=${LOGFILE} '
-                /((set \+o$)|xtrace)/ { next }
-                {
-                    cmd ="date +\"%Y-%m-%d %H:%M:%S.%3N | \""
-                    cmd | getline now
-                    close("date +\"%Y-%m-%d %H:%M:%S.%3N | \"")
-                    sub(/^/, now)
-                    print > logfile
-                    fflush(logfile)
-                    print
-                    fflush("")
-                }' ) 2>&1
+        exec 1> >( $TOP_DIR/tools/outfilter.py -v -o "${LOGFILE}" ) 2>&1
         # Set fd 6 to summary log file
-        exec 6> >( tee "${SUMFILE}" )
+        exec 6> >( $TOP_DIR/tools/outfilter.py -o "${SUMFILE}" )
     else
         # Set fd 1 and 2 to primary logfile
-        exec 1> "${LOGFILE}" 2>&1
+        exec 1> >( $TOP_DIR/tools/outfilter.py -o "${LOGFILE}" ) 2>&1
         # Set fd 6 to summary logfile and stdout
-        exec 6> >( tee "${SUMFILE}" >&3 )
+        exec 6> >( $TOP_DIR/tools/outfilter.py -v -o "${SUMFILE}" >&3 )
     fi
 
     echo_summary "stack.sh log $LOGFILE"
@@ -583,7 +577,7 @@ else
         exec 1>/dev/null 2>&1
     fi
     # Always send summary fd to original stdout
-    exec 6>&3
+    exec 6> >( $TOP_DIR/tools/outfilter.py -v >&3 )
 fi
 
 # Set up logging of screen windows
@@ -621,6 +615,11 @@ function exit_trap {
 
     # Kill the last spinner process
     kill_spinner
+
+    if [[ $r -ne 0 ]]; then
+        echo "Error on exit"
+        ./tools/worlddump.py -d $LOGDIR
+    fi
 
     exit $r
 }
@@ -763,6 +762,8 @@ if is_service_enabled nova; then
 fi
 
 if is_service_enabled horizon; then
+    # django openstack_auth
+    install_django_openstack_auth
     # dashboard
     install_horizon
     configure_horizon
@@ -924,7 +925,7 @@ if is_service_enabled key; then
     start_keystone
 
     # Set up a temporary admin URI for Keystone
-    SERVICE_ENDPOINT=$KEYSTONE_SERVICE_PROTOCOL://$KEYSTONE_AUTH_HOST:$KEYSTONE_AUTH_PORT/v2.0
+    SERVICE_ENDPOINT=$KEYSTONE_AUTH_URI/v2.0
 
     if is_service_enabled tls-proxy; then
         export OS_CACERT=$INT_CA_DIR/ca-chain.pem
@@ -1173,7 +1174,7 @@ fi
 
 if is_service_enabled zeromq; then
     echo_summary "Starting zermomq receiver"
-    screen_it zeromq "cd $NOVA_DIR && $NOVA_BIN_DIR/nova-rpc-zmq-receiver"
+    screen_it zeromq "cd $NOVA_DIR && $OSLO_BIN_DIR/oslo-messaging-zmq-receiver"
 fi
 
 # Launch the nova-api and wait for it to answer before continuing
@@ -1357,7 +1358,7 @@ fi
 
 # If Keystone is present you can point ``nova`` cli to this server
 if is_service_enabled key; then
-    echo "Keystone is serving at $KEYSTONE_AUTH_PROTOCOL://$SERVICE_HOST:$KEYSTONE_SERVICE_PORT/v2.0/"
+    echo "Keystone is serving at $KEYSTONE_SERVICE_URI/v2.0/"
     echo "Examples on using novaclient command line is in exercise.sh"
     echo "The default users are: admin and demo"
     echo "The password: $ADMIN_PASSWORD"
