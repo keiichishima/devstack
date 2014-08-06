@@ -85,6 +85,8 @@ NEUTRON_CONF_DIR=/etc/neutron
 NEUTRON_CONF=$NEUTRON_CONF_DIR/neutron.conf
 export NEUTRON_TEST_CONFIG_FILE=${NEUTRON_TEST_CONFIG_FILE:-"$NEUTRON_CONF_DIR/debug.ini"}
 
+# Default name for Neutron database
+Q_DB_NAME=${Q_DB_NAME:-neutron}
 # Default Neutron Plugin
 Q_PLUGIN=${Q_PLUGIN:-ml2}
 # Default Neutron Port
@@ -143,6 +145,17 @@ else
     Q_RR_COMMAND="sudo $NEUTRON_ROOTWRAP $Q_RR_CONF_FILE"
 fi
 
+
+# Distributed Virtual Router (DVR) configuration
+# Can be:
+#     legacy   - No DVR functionality
+#     dvr_snat - Controller or single node DVR
+#     dvr      - Compute node in multi-node DVR
+Q_DVR_MODE=${Q_DVR_MODE:-legacy}
+if [[ "$Q_DVR_MODE" != "legacy" ]]; then
+    Q_ML2_PLUGIN_MECHANISM_DRIVERS=openvswitch,linuxbridge,l2population
+fi
+
 # Provider Network Configurations
 # --------------------------------
 
@@ -153,15 +166,15 @@ fi
 # remote connectivity), and no physical resources will be
 # available for the allocation of provider networks.
 
-# To use GRE tunnels for tenant networks, set to True in
-# ``localrc``. GRE tunnels are only supported by the openvswitch
-# plugin, and currently only on Ubuntu.
-ENABLE_TENANT_TUNNELS=${ENABLE_TENANT_TUNNELS:-False}
+# To disable tunnels (GRE or VXLAN) for tenant networks,
+# set to False in ``local.conf``.
+# GRE tunnels are only supported by the openvswitch.
+ENABLE_TENANT_TUNNELS=${ENABLE_TENANT_TUNNELS:-True}
 
 # If using GRE tunnels for tenant networks, specify the range of
 # tunnel IDs from which tenant networks are allocated. Can be
 # overriden in ``localrc`` in necesssary.
-TENANT_TUNNEL_RANGES=${TENANT_TUNNEL_RANGE:-1:1000}
+TENANT_TUNNEL_RANGES=${TENANT_TUNNEL_RANGES:-1:1000}
 
 # To use VLANs for tenant networks, set to True in localrc. VLANs
 # are supported by the openvswitch and linuxbridge plugins, each
@@ -202,6 +215,13 @@ OVS_PHYSICAL_BRIDGE=${OVS_PHYSICAL_BRIDGE:-}
 #
 # Example: ``LB_PHYSICAL_INTERFACE=eth1``
 LB_PHYSICAL_INTERFACE=${LB_PHYSICAL_INTERFACE:-}
+
+# When Neutron tunnels are enabled it is needed to specify the
+# IP address of the end point in the local server. This IP is set
+# by default to the same IP address that the HOST IP.
+# This variable can be used to specify a different end point IP address
+# Example: ``TUNNEL_ENDPOINT_IP=1.1.1.1``
+TUNNEL_ENDPOINT_IP=${TUNNEL_ENDPOINT_IP:-$HOST_IP}
 
 # With the openvswitch plugin, set to True in ``localrc`` to enable
 # provider GRE tunnels when ``ENABLE_TENANT_TUNNELS`` is False.
@@ -297,6 +317,13 @@ function configure_neutron {
         _configure_neutron_metadata_agent
     fi
 
+    if [[ "$Q_DVR_MODE" != "legacy" ]]; then
+        _configure_dvr
+    fi
+    if is_service_enabled ceilometer; then
+        _configure_neutron_ceilometer_notifications
+    fi
+
     _configure_neutron_debug_command
 }
 
@@ -307,7 +334,7 @@ function create_nova_conf_neutron {
     iniset $NOVA_CONF neutron admin_auth_url "$KEYSTONE_SERVICE_PROTOCOL://$KEYSTONE_SERVICE_HOST:$KEYSTONE_AUTH_PORT/v2.0"
     iniset $NOVA_CONF neutron auth_strategy "$Q_AUTH_STRATEGY"
     iniset $NOVA_CONF neutron admin_tenant_name "$SERVICE_TENANT_NAME"
-    iniset $NOVA_CONF neutron region_name "RegionOne"
+    iniset $NOVA_CONF neutron region_name "$REGION_NAME"
     iniset $NOVA_CONF neutron url "http://$Q_HOST:$Q_PORT"
 
     if [[ "$Q_USE_SECGROUP" == "True" ]]; then
@@ -350,28 +377,20 @@ function create_neutron_accounts {
     ADMIN_ROLE=$(openstack role list | awk "/ admin / { print \$2 }")
 
     if [[ "$ENABLED_SERVICES" =~ "q-svc" ]]; then
-        NEUTRON_USER=$(openstack user create \
-            neutron \
-            --password "$SERVICE_PASSWORD" \
-            --project $SERVICE_TENANT \
-            --email neutron@example.com \
-            | grep " id " | get_field 2)
-        openstack role add \
-            $ADMIN_ROLE \
-            --project $SERVICE_TENANT \
-            --user $NEUTRON_USER
+
+        NEUTRON_USER=$(get_or_create_user "neutron" \
+            "$SERVICE_PASSWORD" $SERVICE_TENANT)
+        get_or_add_user_role $ADMIN_ROLE $NEUTRON_USER $SERVICE_TENANT
+
         if [[ "$KEYSTONE_CATALOG_BACKEND" = 'sql' ]]; then
-            NEUTRON_SERVICE=$(openstack service create \
-                neutron \
-                --type=network \
-                --description="Neutron Service" \
-                | grep " id " | get_field 2)
-            openstack endpoint create \
-                $NEUTRON_SERVICE \
-                --region RegionOne \
-                --publicurl "http://$SERVICE_HOST:9696/" \
-                --adminurl "http://$SERVICE_HOST:9696/" \
-                --internalurl "http://$SERVICE_HOST:9696/"
+
+            NEUTRON_SERVICE=$(get_or_create_service "neutron" \
+                "network" "Neutron Service")
+            get_or_create_endpoint $NEUTRON_SERVICE \
+                "$REGION_NAME" \
+                "http://$SERVICE_HOST:$Q_PORT/" \
+                "http://$SERVICE_HOST:$Q_PORT/" \
+                "http://$SERVICE_HOST:$Q_PORT/"
         fi
     fi
 }
@@ -473,6 +492,10 @@ function install_neutronclient {
 
 # install_neutron_agent_packages() - Collect source and prepare
 function install_neutron_agent_packages {
+    # radvd doesn't come with the OS. Install it if the l3 service is enabled.
+    if is_service_enabled q-l3; then
+        install_package radvd
+    fi
     # install packages that are specific to plugin agent(s)
     if is_service_enabled q-agt q-dhcp q-l3; then
         neutron_plugin_install_agent_packages
@@ -572,7 +595,7 @@ function cleanup_neutron {
     fi
 
     # delete all namespaces created by neutron
-    for ns in $(sudo ip netns list | grep -o -E '(qdhcp|qrouter|qlbaas)-[0-9a-f-]*'); do
+    for ns in $(sudo ip netns list | grep -o -E '(qdhcp|qrouter|qlbaas|fip|snat)-[0-9a-f-]*'); do
         sudo ip netns delete ${ns}
     done
 }
@@ -606,7 +629,7 @@ function _configure_neutron_common {
     Q_PLUGIN_CONF_FILE=$Q_PLUGIN_CONF_PATH/$Q_PLUGIN_CONF_FILENAME
     cp $NEUTRON_DIR/$Q_PLUGIN_CONF_FILE /$Q_PLUGIN_CONF_FILE
 
-    iniset /$Q_PLUGIN_CONF_FILE database connection `database_connection_url $Q_DB_NAME`
+    iniset $NEUTRON_CONF database connection `database_connection_url $Q_DB_NAME`
     iniset $NEUTRON_CONF DEFAULT state_path $DATA_DIR/neutron
 
     # If addition config files are set, make sure their path name is set as well
@@ -668,14 +691,6 @@ function _configure_neutron_dhcp_agent {
     iniset $Q_DHCP_CONF_FILE DEFAULT use_namespaces $Q_USE_NAMESPACE
     iniset $Q_DHCP_CONF_FILE DEFAULT root_helper "$Q_RR_COMMAND"
 
-    # Define extra "DEFAULT" configuration options when q-dhcp is configured by
-    # defining the array ``Q_DHCP_EXTRA_DEFAULT_OPTS``.
-    # For Example: ``Q_DHCP_EXTRA_DEFAULT_OPTS=(foo=true bar=2)``
-    for I in "${Q_DHCP_EXTRA_DEFAULT_OPTS[@]}"; do
-        # Replace the first '=' with ' ' for iniset syntax
-        iniset $Q_DHCP_CONF_FILE DEFAULT ${I/=/ }
-    done
-
     _neutron_setup_interface_driver $Q_DHCP_CONF_FILE
 
     neutron_plugin_configure_dhcp_agent
@@ -730,6 +745,10 @@ function _configure_neutron_metadata_agent {
 
 }
 
+function _configure_neutron_ceilometer_notifications {
+    iniset $NEUTRON_CONF DEFAULT notification_driver neutron.openstack.common.notifier.rpc_notifier
+}
+
 function _configure_neutron_lbaas {
     neutron_agent_lbaas_configure_common
     neutron_agent_lbaas_configure_agent
@@ -749,6 +768,12 @@ function _configure_neutron_vpn {
     neutron_vpn_install_agent_packages
     neutron_vpn_configure_common
 }
+
+function _configure_dvr {
+    iniset $NEUTRON_CONF DEFAULT router_distributed True
+    iniset $Q_L3_CONF_FILE DEFAULT agent_mode $Q_DVR_MODE
+}
+
 
 # _configure_neutron_plugin_agent() - Set config files for neutron plugin agent
 # It is called when q-agt is enabled.
@@ -786,14 +811,6 @@ function _configure_neutron_service {
 
     iniset $NEUTRON_CONF DEFAULT auth_strategy $Q_AUTH_STRATEGY
     _neutron_setup_keystone $NEUTRON_CONF keystone_authtoken
-
-    # Define extra "DEFAULT" configuration options when q-svc is configured by
-    # defining the array ``Q_SRV_EXTRA_DEFAULT_OPTS``.
-    # For Example: ``Q_SRV_EXTRA_DEFAULT_OPTS=(foo=true bar=2)``
-    for I in "${Q_SRV_EXTRA_DEFAULT_OPTS[@]}"; do
-        # Replace the first '=' with ' ' for iniset syntax
-        iniset $NEUTRON_CONF DEFAULT ${I/=/ }
-    done
 
     # Configuration for neutron notifations to nova.
     iniset $NEUTRON_CONF DEFAULT notify_nova_on_port_status_changes $Q_NOTIFY_NOVA_PORT_STATUS_CHANGES
