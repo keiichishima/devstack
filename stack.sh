@@ -37,6 +37,56 @@ umask 022
 # Keep track of the devstack directory
 TOP_DIR=$(cd $(dirname "$0") && pwd)
 
+
+# Sanity Checks
+# -------------
+
+# Clean up last environment var cache
+if [[ -r $TOP_DIR/.stackenv ]]; then
+    rm $TOP_DIR/.stackenv
+fi
+
+# ``stack.sh`` keeps the list of ``apt`` and ``rpm`` dependencies and config
+# templates and other useful files in the ``files`` subdirectory
+FILES=$TOP_DIR/files
+if [ ! -d $FILES ]; then
+    die $LINENO "missing devstack/files"
+fi
+
+# ``stack.sh`` keeps function libraries here
+# Make sure ``$TOP_DIR/lib`` directory is present
+if [ ! -d $TOP_DIR/lib ]; then
+    die $LINENO "missing devstack/lib"
+fi
+
+# Check if run as root
+# OpenStack is designed to be run as a non-root user; Horizon will fail to run
+# as **root** since Apache will not serve content from **root** user).
+# ``stack.sh`` must not be run as **root**.  It aborts and suggests one course of
+# action to create a suitable user account.
+
+if [[ $EUID -eq 0 ]]; then
+    echo "You are running this script as root."
+    echo "Cut it out."
+    echo "Really."
+    echo "If you need an account to run DevStack, do this (as root, heh) to create $STACK_USER:"
+    echo "$TOP_DIR/tools/create-stack-user.sh"
+    exit 1
+fi
+
+# Check to see if we are already running DevStack
+# Note that this may fail if USE_SCREEN=False
+if type -p screen >/dev/null && screen -ls | egrep -q "[0-9].$SCREEN_NAME"; then
+    echo "You are already running a stack.sh session."
+    echo "To rejoin this session type 'screen -x stack'."
+    echo "To destroy this session, type './unstack.sh'."
+    exit 1
+fi
+
+
+# Prepare the environment
+# -----------------------
+
 # Import common functions
 source $TOP_DIR/functions
 
@@ -47,6 +97,15 @@ source $TOP_DIR/lib/config
 # ``os_RELEASE``, ``os_UPDATE``, ``os_PACKAGE``, ``os_CODENAME``
 # and ``DISTRO``
 GetDistro
+
+# Warn users who aren't on an explicitly supported distro, but allow them to
+# override check and attempt installation with ``FORCE=yes ./stack``
+if [[ ! ${DISTRO} =~ (precise|trusty|7.0|wheezy|sid|testing|jessie|f19|f20|rhel6|rhel7) ]]; then
+    echo "WARNING: this script has not been tested on $DISTRO"
+    if [[ "$FORCE" != "yes" ]]; then
+        die $LINENO "If you wish to run this script anyway run with FORCE=yes"
+    fi
+fi
 
 
 # Global Settings
@@ -110,27 +169,6 @@ export_proxy_variables
 DEST=${DEST:-/opt/stack}
 
 
-# Sanity Check
-# ------------
-
-# Clean up last environment var cache
-if [[ -r $TOP_DIR/.stackenv ]]; then
-    rm $TOP_DIR/.stackenv
-fi
-
-# ``stack.sh`` keeps the list of ``apt`` and ``rpm`` dependencies and config
-# templates and other useful files in the ``files`` subdirectory
-FILES=$TOP_DIR/files
-if [ ! -d $FILES ]; then
-    die $LINENO "missing devstack/files"
-fi
-
-# ``stack.sh`` keeps function libraries here
-# Make sure ``$TOP_DIR/lib`` directory is present
-if [ ! -d $TOP_DIR/lib ]; then
-    die $LINENO "missing devstack/lib"
-fi
-
 # Import common services (database, message queue) configuration
 source $TOP_DIR/lib/database
 source $TOP_DIR/lib/rpc_backend
@@ -140,14 +178,6 @@ source $TOP_DIR/lib/rpc_backend
 # calling disable_service().
 disable_negated_services
 
-# Warn users who aren't on an explicitly supported distro, but allow them to
-# override check and attempt installation with ``FORCE=yes ./stack``
-if [[ ! ${DISTRO} =~ (precise|trusty|7.0|wheezy|sid|testing|jessie|f19|f20|rhel6|rhel7) ]]; then
-    echo "WARNING: this script has not been tested on $DISTRO"
-    if [[ "$FORCE" != "yes" ]]; then
-        die $LINENO "If you wish to run this script anyway run with FORCE=yes"
-    fi
-fi
 
 # Look for obsolete stuff
 if [[ ,${ENABLED_SERVICES}, =~ ,"swift", ]]; then
@@ -157,38 +187,9 @@ if [[ ,${ENABLED_SERVICES}, =~ ,"swift", ]]; then
     exit 1
 fi
 
-# Make sure we only have one rpc backend enabled,
-# and the specified rpc backend is available on your platform.
-check_rpc_backend
 
-# Check to see if we are already running DevStack
-# Note that this may fail if USE_SCREEN=False
-if type -p screen >/dev/null && screen -ls | egrep -q "[0-9].$SCREEN_NAME"; then
-    echo "You are already running a stack.sh session."
-    echo "To rejoin this session type 'screen -x stack'."
-    echo "To destroy this session, type './unstack.sh'."
-    exit 1
-fi
-
-# Set up logging level
-VERBOSE=$(trueorfalse True $VERBOSE)
-
-# root Access
-# -----------
-
-# OpenStack is designed to be run as a non-root user; Horizon will fail to run
-# as **root** since Apache will not serve content from **root** user).
-# ``stack.sh`` must not be run as **root**.  It aborts and suggests one course of
-# action to create a suitable user account.
-
-if [[ $EUID -eq 0 ]]; then
-    echo "You are running this script as root."
-    echo "Cut it out."
-    echo "Really."
-    echo "If you need an account to run DevStack, do this (as root, heh) to create $STACK_USER:"
-    echo "$TOP_DIR/tools/create-stack-user.sh"
-    exit 1
-fi
+# Configure sudo
+# --------------
 
 # We're not **root**, make sure ``sudo`` is available
 is_package_installed sudo || install_package sudo
@@ -213,13 +214,21 @@ sudo mv $TEMPFILE /etc/sudoers.d/50_stack_sh
 
 # For debian/ubuntu make apt attempt to retry network ops on it's own
 if is_ubuntu; then
-    echo 'APT::Acquire::Retries "20";' | sudo tee /etc/apt/apt.conf.d/80retry
+    echo 'APT::Acquire::Retries "20";' | sudo tee /etc/apt/apt.conf.d/80retry  >/dev/null
+fi
+
+# upstream Rackspace centos7 images have an issue where cloud-init is
+# installed via pip because there were not official packages when the
+# image was created (fix in the works).  Remove all pip packages
+# before we do anything else
+if [[ $DISTRO = "rhel7" && is_rackspace ]]; then
+    (sudo pip freeze | xargs sudo pip uninstall -y) || true
 fi
 
 # Some distros need to add repos beyond the defaults provided by the vendor
 # to pick up required packages.
 
-if [[ is_fedora && $DISTRO =~ (rhel) ]]; then
+if [[ is_fedora && $DISTRO == "rhel6" ]]; then
     # Installing Open vSwitch on RHEL requires enabling the RDO repo.
     RHEL6_RDO_REPO_RPM=${RHEL6_RDO_REPO_RPM:-"http://rdo.fedorapeople.org/openstack-icehouse/rdo-release-icehouse.rpm"}
     RHEL6_RDO_REPO_ID=${RHEL6_RDO_REPO_ID:-"openstack-icehouse"}
@@ -228,10 +237,13 @@ if [[ is_fedora && $DISTRO =~ (rhel) ]]; then
         yum_install $RHEL6_RDO_REPO_RPM || \
             die $LINENO "Error installing RDO repo, cannot continue"
     fi
+fi
+
+if [[ is_fedora && ( $DISTRO == "rhel6" || $DISTRO == "rhel7" ) ]]; then
     # RHEL requires EPEL for many Open Stack dependencies
-    if [[ $DISTRO =~ (rhel7) ]]; then
+    if [[ $DISTRO == "rhel7" ]]; then
         EPEL_RPM=${RHEL7_EPEL_RPM:-"http://dl.fedoraproject.org/pub/epel/beta/7/x86_64/epel-release-7-0.2.noarch.rpm"}
-    else
+    elif [[ $DISTRO == "rhel6" ]]; then
         EPEL_RPM=${RHEL6_EPEL_RPM:-"http://dl.fedoraproject.org/pub/epel/6/x86_64/epel-release-6-8.noarch.rpm"}
     fi
     if ! sudo yum repolist enabled epel | grep -q 'epel'; then
@@ -242,13 +254,12 @@ if [[ is_fedora && $DISTRO =~ (rhel) ]]; then
 
     # ... and also optional to be enabled
     is_package_installed yum-utils || install_package yum-utils
-    if [[ $DISTRO =~ (rhel7) ]]; then
+    if [[ $DISTRO == "rhel7" ]]; then
         OPTIONAL_REPO=rhel-7-server-optional-rpms
-    else
+    elif [[ $DISTRO == "rhel6" ]]; then
         OPTIONAL_REPO=rhel-6-server-optional-rpms
     fi
     sudo yum-config-manager --enable ${OPTIONAL_REPO}
-
 fi
 
 # Filesystem setup
@@ -472,6 +483,10 @@ if is_service_enabled s-proxy; then
     # ``SWIFT_HASH`` is a random unique string for a swift cluster that
     # can never change.
     read_password SWIFT_HASH "ENTER A RANDOM SWIFT HASH."
+
+    if [[ -z "$SWIFT_TEMPURL_KEY" ]] && [[ "$SWIFT_ENABLE_TEMPURLS" == "True" ]]; then
+        read_password SWIFT_TEMPURL_KEY "ENTER A KEY FOR SWIFT TEMPURLS."
+    fi
 fi
 
 
@@ -518,7 +533,7 @@ function echo_nolog {
     echo $@ >&3
 }
 
-if [[ is_fedora && $DISTRO =~ (rhel) ]]; then
+if [[ is_fedora && $DISTRO == "rhel6" ]]; then
     # poor old python2.6 doesn't have argparse by default, which
     # outfilter.py uses
     is_package_installed python-argparse || install_package python-argparse
@@ -617,7 +632,11 @@ function exit_trap {
 
     if [[ $r -ne 0 ]]; then
         echo "Error on exit"
-        ./tools/worlddump.py -d $LOGDIR
+        if [[ -z $LOGDIR ]]; then
+            ./tools/worlddump.py
+        else
+            ./tools/worlddump.py -d $LOGDIR
+        fi
     fi
 
     exit $r
@@ -660,7 +679,7 @@ if [[ "$OFFLINE" != "True" ]]; then
 fi
 
 # Do the ugly hacks for broken packages and distros
-$TOP_DIR/tools/fixup_stuff.sh
+source $TOP_DIR/tools/fixup_stuff.sh
 
 
 # Extras Pre-install
@@ -794,6 +813,7 @@ fi
 
 if is_service_enabled heat; then
     install_heat
+    install_heat_other
     cleanup_heat
     configure_heat
 fi
@@ -1253,6 +1273,10 @@ if is_service_enabled heat; then
     init_heat
     echo_summary "Starting Heat"
     start_heat
+    if [ "$HEAT_CREATE_TEST_IMAGE" = "True" ]; then
+        echo_summary "Building Heat functional test image"
+        build_heat_functional_test_image
+    fi
 fi
 
 
