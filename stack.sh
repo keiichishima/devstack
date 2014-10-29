@@ -34,9 +34,11 @@ export LC_ALL
 # Make sure umask is sane
 umask 022
 
+# Not all distros have sbin in PATH for regular users.
+PATH=$PATH:/usr/local/sbin:/usr/sbin:/sbin
+
 # Keep track of the devstack directory
 TOP_DIR=$(cd $(dirname "$0") && pwd)
-
 
 # Sanity Checks
 # -------------
@@ -69,20 +71,10 @@ if [[ $EUID -eq 0 ]]; then
     echo "You are running this script as root."
     echo "Cut it out."
     echo "Really."
-    echo "If you need an account to run DevStack, do this (as root, heh) to create $STACK_USER:"
+    echo "If you need an account to run DevStack, do this (as root, heh) to create a non-root account:"
     echo "$TOP_DIR/tools/create-stack-user.sh"
     exit 1
 fi
-
-# Check to see if we are already running DevStack
-# Note that this may fail if USE_SCREEN=False
-if type -p screen >/dev/null && screen -ls | egrep -q "[0-9].$SCREEN_NAME"; then
-    echo "You are already running a stack.sh session."
-    echo "To rejoin this session type 'screen -x stack'."
-    echo "To destroy this session, type './unstack.sh'."
-    exit 1
-fi
-
 
 # Prepare the environment
 # -----------------------
@@ -109,7 +101,7 @@ fi
 
 
 # Global Settings
-# ===============
+# ---------------
 
 # Check for a ``localrc`` section embedded in ``local.conf`` and extract if
 # ``localrc`` does not already exist
@@ -129,6 +121,7 @@ if [[ -r $TOP_DIR/local.conf ]]; then
         fi
     done
 fi
+
 
 # ``stack.sh`` is customizable by setting environment variables.  Override a
 # default setting via export::
@@ -158,6 +151,15 @@ if [[ ! -r $TOP_DIR/stackrc ]]; then
 fi
 source $TOP_DIR/stackrc
 
+# Check to see if we are already running DevStack
+# Note that this may fail if USE_SCREEN=False
+if type -p screen > /dev/null && screen -ls | egrep -q "[0-9]\.$SCREEN_NAME"; then
+    echo "You are already running a stack.sh session."
+    echo "To rejoin this session type 'screen -x stack'."
+    echo "To destroy this session, type './unstack.sh'."
+    exit 1
+fi
+
 
 # Local Settings
 # --------------
@@ -165,19 +167,10 @@ source $TOP_DIR/stackrc
 # Make sure the proxy config is visible to sub-processes
 export_proxy_variables
 
-# Destination path for installation ``DEST``
-DEST=${DEST:-/opt/stack}
-
-
-# Import common services (database, message queue) configuration
-source $TOP_DIR/lib/database
-source $TOP_DIR/lib/rpc_backend
-
 # Remove services which were negated in ENABLED_SERVICES
 # using the "-" prefix (e.g., "-rabbit") instead of
 # calling disable_service().
 disable_negated_services
-
 
 # Look for obsolete stuff
 if [[ ,${ENABLED_SERVICES}, =~ ,"swift", ]]; then
@@ -186,7 +179,6 @@ if [[ ,${ENABLED_SERVICES}, =~ ,"swift", ]]; then
     echo "FATAL: s-proxy s-object s-container s-account"
     exit 1
 fi
-
 
 # Configure sudo
 # --------------
@@ -209,8 +201,9 @@ chmod 0440 $TEMPFILE
 sudo chown root:root $TEMPFILE
 sudo mv $TEMPFILE /etc/sudoers.d/50_stack_sh
 
-# Additional repos
-# ----------------
+
+# Configure Distro Repositories
+# -----------------------------
 
 # For debian/ubuntu make apt attempt to retry network ops on it's own
 if is_ubuntu; then
@@ -241,16 +234,41 @@ fi
 
 if [[ is_fedora && ( $DISTRO == "rhel6" || $DISTRO == "rhel7" ) ]]; then
     # RHEL requires EPEL for many Open Stack dependencies
+
+    # note we always remove and install latest -- some environments
+    # use snapshot images, and if EPEL version updates they break
+    # unless we update them to latest version.
+    if sudo yum repolist enabled epel | grep -q 'epel'; then
+        uninstall_package epel-release || true
+    fi
+
+    # This trick installs the latest epel-release from a bootstrap
+    # repo, then removes itself (as epel-release installed the
+    # "real" repo).
+    #
+    # you would think that rather than this, you could use
+    # $releasever directly in .repo file we create below.  However
+    # RHEL gives a $releasever of "6Server" which breaks the path;
+    # see https://bugzilla.redhat.com/show_bug.cgi?id=1150759
     if [[ $DISTRO == "rhel7" ]]; then
-        EPEL_RPM=${RHEL7_EPEL_RPM:-"http://dl.fedoraproject.org/pub/epel/beta/7/x86_64/epel-release-7-0.2.noarch.rpm"}
+        epel_ver="7"
     elif [[ $DISTRO == "rhel6" ]]; then
-        EPEL_RPM=${RHEL6_EPEL_RPM:-"http://dl.fedoraproject.org/pub/epel/6/x86_64/epel-release-6-8.noarch.rpm"}
+        epel_ver="6"
     fi
-    if ! sudo yum repolist enabled epel | grep -q 'epel'; then
-        echo "EPEL not detected; installing"
-        yum_install ${EPEL_RPM} || \
-            die $LINENO "Error installing EPEL repo, cannot continue"
-    fi
+
+    cat <<EOF | sudo tee /etc/yum.repos.d/epel-bootstrap.repo
+[epel-bootstrap]
+name=Bootstrap EPEL
+mirrorlist=http://mirrors.fedoraproject.org/mirrorlist?repo=epel-$epel_ver&arch=\$basearch
+failovermethod=priority
+enabled=0
+gpgcheck=0
+EOF
+    # bare yum call due to --enablerepo
+    sudo yum --enablerepo=epel-bootstrap -y install epel-release || \
+        die $LINENO "Error installing EPEL repo, cannot continue"
+    # epel rpm has installed it's version
+    sudo rm -f /etc/yum.repos.d/epel-bootstrap.repo
 
     # ... and also optional to be enabled
     is_package_installed yum-utils || install_package yum-utils
@@ -262,8 +280,12 @@ if [[ is_fedora && ( $DISTRO == "rhel6" || $DISTRO == "rhel7" ) ]]; then
     sudo yum-config-manager --enable ${OPTIONAL_REPO}
 fi
 
-# Filesystem setup
-# ----------------
+
+# Configure Target Directories
+# ----------------------------
+
+# Destination path for installation ``DEST``
+DEST=${DEST:-/opt/stack}
 
 # Create the destination directory and ensure it is writable by the user
 # and read/executable by everybody for daemons (e.g. apache run for horizon)
@@ -274,6 +296,12 @@ safe_chmod 0755 $DEST
 # a basic test for $DEST path permissions (fatal on error unless skipped)
 check_path_perm_sanity ${DEST}
 
+# Destination path for service data
+DATA_DIR=${DATA_DIR:-${DEST}/data}
+sudo mkdir -p $DATA_DIR
+safe_chown -R $STACK_USER $DATA_DIR
+
+# Configure proper hostname
 # Certain services such as rabbitmq require that the local hostname resolves
 # correctly.  Make sure it exists in /etc/hosts so that is always true.
 LOCAL_HOSTNAME=`hostname -s`
@@ -281,217 +309,12 @@ if [ -z "`grep ^127.0.0.1 /etc/hosts | grep $LOCAL_HOSTNAME`" ]; then
     sudo sed -i "s/\(^127.0.0.1.*\)/\1 $LOCAL_HOSTNAME/" /etc/hosts
 fi
 
-# Destination path for service data
-DATA_DIR=${DATA_DIR:-${DEST}/data}
-sudo mkdir -p $DATA_DIR
-safe_chown -R $STACK_USER $DATA_DIR
 
-
-# Common Configuration
-# --------------------
-
-# Set ``OFFLINE`` to ``True`` to configure ``stack.sh`` to run cleanly without
-# Internet access. ``stack.sh`` must have been previously run with Internet
-# access to install prerequisites and fetch repositories.
-OFFLINE=`trueorfalse False $OFFLINE`
-
-# Set ``ERROR_ON_CLONE`` to ``True`` to configure ``stack.sh`` to exit if
-# the destination git repository does not exist during the ``git_clone``
-# operation.
-ERROR_ON_CLONE=`trueorfalse False $ERROR_ON_CLONE`
-
-# Whether to enable the debug log level in OpenStack services
-ENABLE_DEBUG_LOG_LEVEL=`trueorfalse True $ENABLE_DEBUG_LOG_LEVEL`
-
-# Set fixed and floating range here so we can make sure not to use addresses
-# from either range when attempting to guess the IP to use for the host.
-# Note that setting FIXED_RANGE may be necessary when running DevStack
-# in an OpenStack cloud that uses either of these address ranges internally.
-FLOATING_RANGE=${FLOATING_RANGE:-172.24.4.0/24}
-FIXED_RANGE=${FIXED_RANGE:-10.0.0.0/24}
-FIXED_NETWORK_SIZE=${FIXED_NETWORK_SIZE:-256}
-
-HOST_IP=$(get_default_host_ip $FIXED_RANGE $FLOATING_RANGE "$HOST_IP_IFACE" "$HOST_IP")
-if [ "$HOST_IP" == "" ]; then
-    die $LINENO "Could not determine host ip address.  See local.conf for suggestions on setting HOST_IP."
-fi
-
-# Allow the use of an alternate hostname (such as localhost/127.0.0.1) for service endpoints.
-SERVICE_HOST=${SERVICE_HOST:-$HOST_IP}
-
-# Configure services to use syslog instead of writing to individual log files
-SYSLOG=`trueorfalse False $SYSLOG`
-SYSLOG_HOST=${SYSLOG_HOST:-$HOST_IP}
-SYSLOG_PORT=${SYSLOG_PORT:-516}
-
-# for DSTAT logging
-DSTAT_FILE=${DSTAT_FILE:-"dstat.txt"}
-
-# Use color for logging output (only available if syslog is not used)
-LOG_COLOR=`trueorfalse True $LOG_COLOR`
-
-# Service startup timeout
-SERVICE_TIMEOUT=${SERVICE_TIMEOUT:-60}
-
-# Reset the bundle of CA certificates
-SSL_BUNDLE_FILE="$DATA_DIR/ca-bundle.pem"
-rm -f $SSL_BUNDLE_FILE
-
-
-# Configure Projects
-# ==================
-
-# Import apache functions
-source $TOP_DIR/lib/apache
-
-# Import TLS functions
-source $TOP_DIR/lib/tls
-
-# Source project function libraries
-source $TOP_DIR/lib/infra
-source $TOP_DIR/lib/oslo
-source $TOP_DIR/lib/stackforge
-source $TOP_DIR/lib/horizon
-source $TOP_DIR/lib/keystone
-source $TOP_DIR/lib/glance
-source $TOP_DIR/lib/nova
-source $TOP_DIR/lib/cinder
-source $TOP_DIR/lib/swift
-source $TOP_DIR/lib/ceilometer
-source $TOP_DIR/lib/heat
-source $TOP_DIR/lib/neutron
-source $TOP_DIR/lib/baremetal
-source $TOP_DIR/lib/ldap
-
-# Extras Source
-# --------------
-
-# Phase: source
-if [[ -d $TOP_DIR/extras.d ]]; then
-    for i in $TOP_DIR/extras.d/*.sh; do
-        [[ -r $i ]] && source $i source
-    done
-fi
-
-# Set the destination directories for other OpenStack projects
-OPENSTACKCLIENT_DIR=$DEST/python-openstackclient
-
-# Interactive Configuration
-# -------------------------
-
-# Do all interactive config up front before the logging spew begins
-
-# Generic helper to configure passwords
-function read_password {
-    XTRACE=$(set +o | grep xtrace)
-    set +o xtrace
-    var=$1; msg=$2
-    pw=${!var}
-
-    if [[ -f $RC_DIR/localrc ]]; then
-        localrc=$TOP_DIR/localrc
-    else
-        localrc=$TOP_DIR/.localrc.auto
-    fi
-
-    # If the password is not defined yet, proceed to prompt user for a password.
-    if [ ! $pw ]; then
-        # If there is no localrc file, create one
-        if [ ! -e $localrc ]; then
-            touch $localrc
-        fi
-
-        # Presumably if we got this far it can only be that our localrc is missing
-        # the required password.  Prompt user for a password and write to localrc.
-        echo ''
-        echo '################################################################################'
-        echo $msg
-        echo '################################################################################'
-        echo "This value will be written to your localrc file so you don't have to enter it "
-        echo "again.  Use only alphanumeric characters."
-        echo "If you leave this blank, a random default value will be used."
-        pw=" "
-        while true; do
-            echo "Enter a password now:"
-            read -e $var
-            pw=${!var}
-            [[ "$pw" = "`echo $pw | tr -cd [:alnum:]`" ]] && break
-            echo "Invalid chars in password.  Try again:"
-        done
-        if [ ! $pw ]; then
-            pw=$(cat /dev/urandom | tr -cd 'a-f0-9' | head -c 20)
-        fi
-        eval "$var=$pw"
-        echo "$var=$pw" >> $localrc
-    fi
-    $XTRACE
-}
-
-
-# Database Configuration
-
-# To select between database backends, add the following to ``localrc``:
-#
-#    disable_service mysql
-#    enable_service postgresql
-#
-# The available database backends are listed in ``DATABASE_BACKENDS`` after
-# ``lib/database`` is sourced. ``mysql`` is the default.
-
-initialize_database_backends && echo "Using $DATABASE_TYPE database backend" || echo "No database enabled"
-
-
-# Queue Configuration
-
-# Rabbit connection info
-if is_service_enabled rabbit; then
-    RABBIT_HOST=${RABBIT_HOST:-$SERVICE_HOST}
-    read_password RABBIT_PASSWORD "ENTER A PASSWORD TO USE FOR RABBIT."
-fi
-
-
-# Keystone
-
-if is_service_enabled key; then
-    # The ``SERVICE_TOKEN`` is used to bootstrap the Keystone database.  It is
-    # just a string and is not a 'real' Keystone token.
-    read_password SERVICE_TOKEN "ENTER A SERVICE_TOKEN TO USE FOR THE SERVICE ADMIN TOKEN."
-    # Services authenticate to Identity with servicename/``SERVICE_PASSWORD``
-    read_password SERVICE_PASSWORD "ENTER A SERVICE_PASSWORD TO USE FOR THE SERVICE AUTHENTICATION."
-    # Horizon currently truncates usernames and passwords at 20 characters
-    read_password ADMIN_PASSWORD "ENTER A PASSWORD TO USE FOR HORIZON AND KEYSTONE (20 CHARS OR LESS)."
-
-    # Keystone can now optionally install OpenLDAP by enabling the ``ldap``
-    # service in ``localrc`` (e.g. ``enable_service ldap``).
-    # To clean out the Keystone contents in OpenLDAP set ``KEYSTONE_CLEAR_LDAP``
-    # to ``yes`` (e.g. ``KEYSTONE_CLEAR_LDAP=yes``) in ``localrc``.  To enable the
-    # Keystone Identity Driver (``keystone.identity.backends.ldap.Identity``)
-    # set ``KEYSTONE_IDENTITY_BACKEND`` to ``ldap`` (e.g.
-    # ``KEYSTONE_IDENTITY_BACKEND=ldap``) in ``localrc``.
-
-    # only request ldap password if the service is enabled
-    if is_service_enabled ldap; then
-        read_password LDAP_PASSWORD "ENTER A PASSWORD TO USE FOR LDAP"
-    fi
-fi
-
-
-# Swift
-
-if is_service_enabled s-proxy; then
-    # We only ask for Swift Hash if we have enabled swift service.
-    # ``SWIFT_HASH`` is a random unique string for a swift cluster that
-    # can never change.
-    read_password SWIFT_HASH "ENTER A RANDOM SWIFT HASH."
-
-    if [[ -z "$SWIFT_TEMPURL_KEY" ]] && [[ "$SWIFT_ENABLE_TEMPURLS" == "True" ]]; then
-        read_password SWIFT_TEMPURL_KEY "ENTER A KEY FOR SWIFT TEMPURLS."
-    fi
-fi
-
-
-# Configure logging
+# Configure Logging
 # -----------------
+
+# Set up logging level
+VERBOSE=$(trueorfalse True $VERBOSE)
 
 # Draw a spinner so the user knows something is happening
 function spinner {
@@ -612,8 +435,8 @@ if [[ -n "$SCREEN_LOGDIR" ]]; then
 fi
 
 
-# Set Up Script Execution
-# -----------------------
+# Configure Error Traps
+# ---------------------
 
 # Kill background processes on exit
 trap exit_trap EXIT
@@ -633,9 +456,9 @@ function exit_trap {
     if [[ $r -ne 0 ]]; then
         echo "Error on exit"
         if [[ -z $LOGDIR ]]; then
-            ./tools/worlddump.py
+            $TOP_DIR/tools/worlddump.py
         else
-            ./tools/worlddump.py -d $LOGDIR
+            $TOP_DIR/tools/worlddump.py -d $LOGDIR
         fi
     fi
 
@@ -655,12 +478,227 @@ function err_trap {
     exit $r
 }
 
-
+# Begin trapping error exit codes
 set -o errexit
 
 # Print the commands being run so that we can see the command that triggers
 # an error.  It is also useful for following along as the install occurs.
 set -o xtrace
+
+
+# Common Configuration
+# --------------------
+
+# Set ``OFFLINE`` to ``True`` to configure ``stack.sh`` to run cleanly without
+# Internet access. ``stack.sh`` must have been previously run with Internet
+# access to install prerequisites and fetch repositories.
+OFFLINE=`trueorfalse False $OFFLINE`
+
+# Set ``ERROR_ON_CLONE`` to ``True`` to configure ``stack.sh`` to exit if
+# the destination git repository does not exist during the ``git_clone``
+# operation.
+ERROR_ON_CLONE=`trueorfalse False $ERROR_ON_CLONE`
+
+# Whether to enable the debug log level in OpenStack services
+ENABLE_DEBUG_LOG_LEVEL=`trueorfalse True $ENABLE_DEBUG_LOG_LEVEL`
+
+# Set fixed and floating range here so we can make sure not to use addresses
+# from either range when attempting to guess the IP to use for the host.
+# Note that setting FIXED_RANGE may be necessary when running DevStack
+# in an OpenStack cloud that uses either of these address ranges internally.
+FLOATING_RANGE=${FLOATING_RANGE:-172.24.4.0/24}
+FIXED_RANGE=${FIXED_RANGE:-10.0.0.0/24}
+FIXED_NETWORK_SIZE=${FIXED_NETWORK_SIZE:-256}
+
+HOST_IP=$(get_default_host_ip $FIXED_RANGE $FLOATING_RANGE "$HOST_IP_IFACE" "$HOST_IP")
+if [ "$HOST_IP" == "" ]; then
+    die $LINENO "Could not determine host ip address.  See local.conf for suggestions on setting HOST_IP."
+fi
+
+# Allow the use of an alternate hostname (such as localhost/127.0.0.1) for service endpoints.
+SERVICE_HOST=${SERVICE_HOST:-$HOST_IP}
+
+# Configure services to use syslog instead of writing to individual log files
+SYSLOG=`trueorfalse False $SYSLOG`
+SYSLOG_HOST=${SYSLOG_HOST:-$HOST_IP}
+SYSLOG_PORT=${SYSLOG_PORT:-516}
+
+# Use color for logging output (only available if syslog is not used)
+LOG_COLOR=`trueorfalse True $LOG_COLOR`
+
+# Reset the bundle of CA certificates
+SSL_BUNDLE_FILE="$DATA_DIR/ca-bundle.pem"
+rm -f $SSL_BUNDLE_FILE
+
+# Import common services (database, message queue) configuration
+source $TOP_DIR/lib/database
+source $TOP_DIR/lib/rpc_backend
+
+# Make sure we only have one rpc backend enabled,
+# and the specified rpc backend is available on your platform.
+check_rpc_backend
+
+# Use native SSL for servers in SSL_ENABLED_SERVICES
+USE_SSL=$(trueorfalse False $USE_SSL)
+
+# Service to enable with SSL if USE_SSL is True
+SSL_ENABLED_SERVICES="key,nova,cinder,glance,s-proxy,neutron"
+
+if is_service_enabled tls-proxy && [ "$USE_SSL" == "True" ]; then
+    die $LINENO "tls-proxy and SSL are mutually exclusive"
+fi
+
+# Configure Projects
+# ==================
+
+# Import apache functions
+source $TOP_DIR/lib/apache
+
+# Import TLS functions
+source $TOP_DIR/lib/tls
+
+# Source project function libraries
+source $TOP_DIR/lib/infra
+source $TOP_DIR/lib/oslo
+source $TOP_DIR/lib/stackforge
+source $TOP_DIR/lib/horizon
+source $TOP_DIR/lib/keystone
+source $TOP_DIR/lib/glance
+source $TOP_DIR/lib/nova
+source $TOP_DIR/lib/cinder
+source $TOP_DIR/lib/swift
+source $TOP_DIR/lib/ceilometer
+source $TOP_DIR/lib/heat
+source $TOP_DIR/lib/neutron
+source $TOP_DIR/lib/baremetal
+source $TOP_DIR/lib/ldap
+source $TOP_DIR/lib/dstat
+
+# Extras Source
+# --------------
+
+# Phase: source
+if [[ -d $TOP_DIR/extras.d ]]; then
+    for i in $TOP_DIR/extras.d/*.sh; do
+        [[ -r $i ]] && source $i source
+    done
+fi
+
+# Set the destination directories for other OpenStack projects
+OPENSTACKCLIENT_DIR=$DEST/python-openstackclient
+
+# Interactive Configuration
+# -------------------------
+
+# Do all interactive config up front before the logging spew begins
+
+# Generic helper to configure passwords
+function read_password {
+    XTRACE=$(set +o | grep xtrace)
+    set +o xtrace
+    var=$1; msg=$2
+    pw=${!var}
+
+    if [[ -f $RC_DIR/localrc ]]; then
+        localrc=$TOP_DIR/localrc
+    else
+        localrc=$TOP_DIR/.localrc.auto
+    fi
+
+    # If the password is not defined yet, proceed to prompt user for a password.
+    if [ ! $pw ]; then
+        # If there is no localrc file, create one
+        if [ ! -e $localrc ]; then
+            touch $localrc
+        fi
+
+        # Presumably if we got this far it can only be that our localrc is missing
+        # the required password.  Prompt user for a password and write to localrc.
+        echo ''
+        echo '################################################################################'
+        echo $msg
+        echo '################################################################################'
+        echo "This value will be written to your localrc file so you don't have to enter it "
+        echo "again.  Use only alphanumeric characters."
+        echo "If you leave this blank, a random default value will be used."
+        pw=" "
+        while true; do
+            echo "Enter a password now:"
+            read -e $var
+            pw=${!var}
+            [[ "$pw" = "`echo $pw | tr -cd [:alnum:]`" ]] && break
+            echo "Invalid chars in password.  Try again:"
+        done
+        if [ ! $pw ]; then
+            pw=$(generate_hex_string 10)
+        fi
+        eval "$var=$pw"
+        echo "$var=$pw" >> $localrc
+    fi
+    $XTRACE
+}
+
+
+# Database Configuration
+
+# To select between database backends, add the following to ``localrc``:
+#
+#    disable_service mysql
+#    enable_service postgresql
+#
+# The available database backends are listed in ``DATABASE_BACKENDS`` after
+# ``lib/database`` is sourced. ``mysql`` is the default.
+
+initialize_database_backends && echo "Using $DATABASE_TYPE database backend" || echo "No database enabled"
+
+
+# Queue Configuration
+
+# Rabbit connection info
+if is_service_enabled rabbit; then
+    RABBIT_HOST=${RABBIT_HOST:-$SERVICE_HOST}
+    read_password RABBIT_PASSWORD "ENTER A PASSWORD TO USE FOR RABBIT."
+fi
+
+
+# Keystone
+
+if is_service_enabled key; then
+    # The ``SERVICE_TOKEN`` is used to bootstrap the Keystone database.  It is
+    # just a string and is not a 'real' Keystone token.
+    read_password SERVICE_TOKEN "ENTER A SERVICE_TOKEN TO USE FOR THE SERVICE ADMIN TOKEN."
+    # Services authenticate to Identity with servicename/``SERVICE_PASSWORD``
+    read_password SERVICE_PASSWORD "ENTER A SERVICE_PASSWORD TO USE FOR THE SERVICE AUTHENTICATION."
+    # Horizon currently truncates usernames and passwords at 20 characters
+    read_password ADMIN_PASSWORD "ENTER A PASSWORD TO USE FOR HORIZON AND KEYSTONE (20 CHARS OR LESS)."
+
+    # Keystone can now optionally install OpenLDAP by enabling the ``ldap``
+    # service in ``localrc`` (e.g. ``enable_service ldap``).
+    # To clean out the Keystone contents in OpenLDAP set ``KEYSTONE_CLEAR_LDAP``
+    # to ``yes`` (e.g. ``KEYSTONE_CLEAR_LDAP=yes``) in ``localrc``.  To enable the
+    # Keystone Identity Driver (``keystone.identity.backends.ldap.Identity``)
+    # set ``KEYSTONE_IDENTITY_BACKEND`` to ``ldap`` (e.g.
+    # ``KEYSTONE_IDENTITY_BACKEND=ldap``) in ``localrc``.
+
+    # only request ldap password if the service is enabled
+    if is_service_enabled ldap; then
+        read_password LDAP_PASSWORD "ENTER A PASSWORD TO USE FOR LDAP"
+    fi
+fi
+
+
+# Swift
+
+if is_service_enabled s-proxy; then
+    # We only ask for Swift Hash if we have enabled swift service.
+    # ``SWIFT_HASH`` is a random unique string for a swift cluster that
+    # can never change.
+    read_password SWIFT_HASH "ENTER A RANDOM SWIFT HASH."
+
+    if [[ -z "$SWIFT_TEMPURL_KEY" ]] && [[ "$SWIFT_ENABLE_TEMPURLS" == "True" ]]; then
+        read_password SWIFT_TEMPURL_KEY "ENTER A KEY FOR SWIFT TEMPURLS."
+    fi
+fi
 
 
 # Install Packages
@@ -818,7 +856,7 @@ if is_service_enabled heat; then
     configure_heat
 fi
 
-if is_service_enabled tls-proxy; then
+if is_service_enabled tls-proxy || [ "$USE_SSL" == "True" ]; then
     configure_CA
     init_CA
     init_cert
@@ -941,12 +979,7 @@ init_service_check
 # -------
 
 # A better kind of sysstat, with the top process per time slice
-DSTAT_OPTS="-tcmndrylp --top-cpu-adv"
-if [[ -n ${SCREEN_LOGDIR} ]]; then
-    screen_it dstat "cd $TOP_DIR; dstat $DSTAT_OPTS | tee $SCREEN_LOGDIR/$DSTAT_FILE"
-else
-    screen_it dstat "dstat $DSTAT_OPTS"
-fi
+start_dstat
 
 # Start Services
 # ==============
@@ -989,7 +1022,7 @@ if is_service_enabled key; then
         create_swift_accounts
     fi
 
-    if is_service_enabled heat; then
+    if is_service_enabled heat && [[ "$HEAT_STANDALONE" != "True" ]]; then
         create_heat_accounts
     fi
 
@@ -1204,16 +1237,12 @@ fi
 
 # Create a randomized default value for the keymgr's fixed_key
 if is_service_enabled nova; then
-    FIXED_KEY=""
-    for i in $(seq 1 64); do
-        FIXED_KEY+=$(echo "obase=16; $(($RANDOM % 16))" | bc);
-    done;
-    iniset $NOVA_CONF keymgr fixed_key "$FIXED_KEY"
+    iniset $NOVA_CONF keymgr fixed_key $(generate_hex_string 32)
 fi
 
 if is_service_enabled zeromq; then
     echo_summary "Starting zermomq receiver"
-    screen_it zeromq "cd $NOVA_DIR && $OSLO_BIN_DIR/oslo-messaging-zmq-receiver"
+    run_process zeromq "$OSLO_BIN_DIR/oslo-messaging-zmq-receiver"
 fi
 
 # Launch the nova-api and wait for it to answer before continuing
@@ -1294,6 +1323,10 @@ if is_service_enabled nova && is_service_enabled key; then
         USERRC_PARAMS="$USERRC_PARAMS --os-cacert $SSL_BUNDLE_FILE"
     fi
 
+    if [[ "$HEAT_STANDALONE" = "True" ]]; then
+        USERRC_PARAMS="$USERRC_PARAMS --heat-url http://$HEAT_API_HOST:$HEAT_API_PORT/v1"
+    fi
+
     $TOP_DIR/tools/create_userrc.sh $USERRC_PARAMS
 fi
 
@@ -1321,7 +1354,7 @@ if is_service_enabled nova && is_baremetal; then
     fi
     # ensure callback daemon is running
     sudo pkill nova-baremetal-deploy-helper || true
-    screen_it baremetal "cd ; nova-baremetal-deploy-helper"
+    run_process baremetal "nova-baremetal-deploy-helper"
 fi
 
 # Save some values we generated for later use
@@ -1416,51 +1449,55 @@ if [[ -n "$DEPRECATED_TEXT" ]]; then
     echo_summary "WARNING: $DEPRECATED_TEXT"
 fi
 
-# TODO(dtroyer): Remove Q_AGENT_EXTRA_AGENT_OPTS after stable/juno branch is cut
-if [[ -n "$Q_AGENT_EXTRA_AGENT_OPTS" ]]; then
-    echo ""
-    echo_summary "WARNING: Q_AGENT_EXTRA_AGENT_OPTS is used"
-    echo "You are using Q_AGENT_EXTRA_AGENT_OPTS to pass configuration into $NEUTRON_CONF."
-    echo "Please convert that configuration in localrc to a $NEUTRON_CONF section in local.conf:"
-    echo "Q_AGENT_EXTRA_AGENT_OPTS will be removed early in the 'K' development cycle"
-    echo "
+if is_service_enabled neutron; then
+    # TODO(dtroyer): Remove Q_AGENT_EXTRA_AGENT_OPTS after stable/juno branch is cut
+    if [[ -n "$Q_AGENT_EXTRA_AGENT_OPTS" ]]; then
+        echo ""
+        echo_summary "WARNING: Q_AGENT_EXTRA_AGENT_OPTS is used"
+        echo "You are using Q_AGENT_EXTRA_AGENT_OPTS to pass configuration into $NEUTRON_CONF."
+        echo "Please convert that configuration in localrc to a $NEUTRON_CONF section in local.conf:"
+        echo "Q_AGENT_EXTRA_AGENT_OPTS will be removed early in the 'K' development cycle"
+        echo "
 [[post-config|/\$Q_PLUGIN_CONF_FILE]]
 [DEFAULT]
 "
-    for I in "${Q_AGENT_EXTRA_AGENT_OPTS[@]}"; do
-        # Replace the first '=' with ' ' for iniset syntax
-        echo ${I}
-    done
-fi
+        for I in "${Q_AGENT_EXTRA_AGENT_OPTS[@]}"; do
+            # Replace the first '=' with ' ' for iniset syntax
+            echo ${I}
+        done
+    fi
 
-# TODO(dtroyer): Remove Q_AGENT_EXTRA_SRV_OPTS after stable/juno branch is cut
-if [[ -n "$Q_AGENT_EXTRA_SRV_OPTS" ]]; then
-    echo ""
-    echo_summary "WARNING: Q_AGENT_EXTRA_SRV_OPTS is used"
-    echo "You are using Q_AGENT_EXTRA_SRV_OPTS to pass configuration into $NEUTRON_CONF."
-    echo "Please convert that configuration in localrc to a $NEUTRON_CONF section in local.conf:"
-    echo "Q_AGENT_EXTRA_AGENT_OPTS will be removed early in the 'K' development cycle"
-    echo "
+    # TODO(dtroyer): Remove Q_AGENT_EXTRA_SRV_OPTS after stable/juno branch is cut
+    if [[ -n "$Q_AGENT_EXTRA_SRV_OPTS" ]]; then
+        echo ""
+        echo_summary "WARNING: Q_AGENT_EXTRA_SRV_OPTS is used"
+        echo "You are using Q_AGENT_EXTRA_SRV_OPTS to pass configuration into $NEUTRON_CONF."
+        echo "Please convert that configuration in localrc to a $NEUTRON_CONF section in local.conf:"
+        echo "Q_AGENT_EXTRA_AGENT_OPTS will be removed early in the 'K' development cycle"
+        echo "
 [[post-config|/\$Q_PLUGIN_CONF_FILE]]
 [DEFAULT]
 "
-    for I in "${Q_AGENT_EXTRA_SRV_OPTS[@]}"; do
-        # Replace the first '=' with ' ' for iniset syntax
-        echo ${I}
-    done
+        for I in "${Q_AGENT_EXTRA_SRV_OPTS[@]}"; do
+            # Replace the first '=' with ' ' for iniset syntax
+            echo ${I}
+        done
+    fi
 fi
 
-# TODO(dtroyer): Remove CINDER_MULTI_LVM_BACKEND after stable/juno branch is cut
-if [[ "$CINDER_MULTI_LVM_BACKEND" = "True" ]]; then
-    echo ""
-    echo_summary "WARNING: CINDER_MULTI_LVM_BACKEND is used"
-    echo "You are using CINDER_MULTI_LVM_BACKEND to configure Cinder's multiple LVM backends"
-    echo "Please convert that configuration in local.conf to use CINDER_ENABLED_BACKENDS."
-    echo "CINDER_ENABLED_BACKENDS will be removed early in the 'K' development cycle"
-    echo "
+if is_service_enabled cinder; then
+    # TODO(dtroyer): Remove CINDER_MULTI_LVM_BACKEND after stable/juno branch is cut
+    if [[ "$CINDER_MULTI_LVM_BACKEND" = "True" ]]; then
+        echo ""
+        echo_summary "WARNING: CINDER_MULTI_LVM_BACKEND is used"
+        echo "You are using CINDER_MULTI_LVM_BACKEND to configure Cinder's multiple LVM backends"
+        echo "Please convert that configuration in local.conf to use CINDER_ENABLED_BACKENDS."
+        echo "CINDER_MULTI_LVM_BACKEND will be removed early in the 'K' development cycle"
+        echo "
 [[local|localrc]]
 CINDER_ENABLED_BACKENDS=lvm:lvmdriver-1,lvm:lvmdriver-2
 "
+    fi
 fi
 
 # Indicate how long this took to run (bash maintained variable ``SECONDS``)

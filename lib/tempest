@@ -28,6 +28,7 @@
 # - ``DEFAULT_INSTANCE_TYPE``
 # - ``DEFAULT_INSTANCE_USER``
 # - ``CINDER_MULTI_LVM_BACKEND``
+# - ``CINDER_ENABLED_BACKENDS``
 #
 # ``stack.sh`` calls the entry points in this order:
 #
@@ -48,6 +49,7 @@ TEMPEST_DIR=$DEST/tempest
 TEMPEST_CONFIG_DIR=${TEMPEST_CONFIG_DIR:-$TEMPEST_DIR/etc}
 TEMPEST_CONFIG=$TEMPEST_CONFIG_DIR/tempest.conf
 TEMPEST_STATE_PATH=${TEMPEST_STATE_PATH:=$DATA_DIR/tempest}
+TEMPEST_LIB_DIR=$DEST/tempest-lib
 
 NOVA_SOURCE_DIR=$DEST/nova
 
@@ -63,8 +65,10 @@ BOTO_MATERIALS_PATH="$FILES/images/s3-materials/cirros-${CIRROS_VERSION}"
 
 # Cinder/Volume variables
 TEMPEST_VOLUME_DRIVER=${TEMPEST_VOLUME_DRIVER:-default}
-TEMPEST_VOLUME_VENDOR=${TEMPEST_VOLUME_VENDOR:-"Open Source"}
-TEMPEST_STORAGE_PROTOCOL=${TEMPEST_STORAGE_PROTOCOL:-iSCSI}
+TEMPEST_DEFAULT_VOLUME_VENDOR="Open Source"
+TEMPEST_VOLUME_VENDOR=${TEMPEST_VOLUME_VENDOR:-$TEMPEST_DEFAULT_VOLUME_VENDOR}
+TEMPEST_DEFAULT_STORAGE_PROTOCOL="iSCSI"
+TEMPEST_STORAGE_PROTOCOL=${TEMPEST_STORAGE_PROTOCOL:-$TEMPEST_DEFAULT_STORAGE_PROTOCOL}
 
 # Neutron/Network variables
 IPV6_ENABLED=$(trueorfalse True $IPV6_ENABLED)
@@ -283,17 +287,18 @@ function configure_tempest {
     iniset $TEMPEST_CONFIG compute image_ref $image_uuid
     iniset $TEMPEST_CONFIG compute image_ssh_user ${DEFAULT_INSTANCE_USER:-cirros}
     iniset $TEMPEST_CONFIG compute image_ref_alt $image_uuid_alt
-    iniset $TEMPEST_CONFIG compute image_alt_ssh_user ${DEFAULT_INSTANCE_USER:-cirros}
+    iniset $TEMPEST_CONFIG compute image_alt_ssh_user ${ALT_INSTANCE_USER:-cirros}
     iniset $TEMPEST_CONFIG compute flavor_ref $flavor_ref
     iniset $TEMPEST_CONFIG compute flavor_ref_alt $flavor_ref_alt
     iniset $TEMPEST_CONFIG compute ssh_connect_method $ssh_connect_method
 
     # Compute Features
-    iniset $TEMPEST_CONFIG compute-feature-enabled api_v3 ${TEMPEST_NOVA_API_V3:-False}
     iniset $TEMPEST_CONFIG compute-feature-enabled resize True
     iniset $TEMPEST_CONFIG compute-feature-enabled live_migration ${LIVE_MIGRATION_AVAILABLE:-False}
     iniset $TEMPEST_CONFIG compute-feature-enabled change_password False
     iniset $TEMPEST_CONFIG compute-feature-enabled block_migration_for_live_migration ${USE_BLOCK_MIGRATION_FOR_LIVE_MIGRATION:-False}
+    iniset $TEMPEST_CONFIG compute-feature-enabled api_extensions ${COMPUTE_API_EXTENSIONS:-"all"}
+    iniset $TEMPEST_CONFIG compute-feature-disabled api_extensions ${DISABLE_COMPUTE_API_EXTENSIONS}
 
     # Compute admin
     iniset $TEMPEST_CONFIG "compute-admin" username $ADMIN_USERNAME
@@ -308,9 +313,11 @@ function configure_tempest {
     iniset $TEMPEST_CONFIG network default_network "$FIXED_RANGE"
     iniset $TEMPEST_CONFIG network-feature-enabled ipv6 "$IPV6_ENABLED"
     iniset $TEMPEST_CONFIG network-feature-enabled ipv6_subnet_attributes "$IPV6_SUBNET_ATTRIBUTES_ENABLED"
+    iniset $TEMPEST_CONFIG network-feature-enabled api_extensions ${NETWORK_API_EXTENSIONS:-"all"}
+    iniset $TEMPEST_CONFIG network-feature-disabled api_extensions ${DISABLE_NETWORK_API_EXTENSIONS}
 
     # boto
-    iniset $TEMPEST_CONFIG boto ec2_url "http://$SERVICE_HOST:8773/services/Cloud"
+    iniset $TEMPEST_CONFIG boto ec2_url "$EC2_SERVICE_PROTOCOL://$SERVICE_HOST:8773/services/Cloud"
     iniset $TEMPEST_CONFIG boto s3_url "http://$SERVICE_HOST:${S3_SERVICE_PORT:-3333}"
     iniset $TEMPEST_CONFIG boto s3_materials_path "$BOTO_MATERIALS_PATH"
     iniset $TEMPEST_CONFIG boto ari_manifest cirros-${CIRROS_VERSION}-${CIRROS_ARCH}-initrd.manifest.xml
@@ -348,19 +355,35 @@ function configure_tempest {
     # Once Tempest retires support for icehouse this flag can be removed.
     iniset $TEMPEST_CONFIG telemetry too_slow_to_test "False"
 
+    # Object storage
+    iniset $TEMPEST_CONFIG object-storage-feature-enabled discoverable_apis ${OBJECT_STORAGE_API_EXTENSIONS:-"all"}
+    iniset $TEMPEST_CONFIG object-storage-feature-disabled discoverable_apis ${OBJECT_STORAGE_DISABLE_API_EXTENSIONS}
+
     # Volume
+    iniset $TEMPEST_CONFIG volume-feature-enabled api_extensions ${VOLUME_API_EXTENSIONS:-"all"}
+    iniset $TEMPEST_CONFIG volume-feature-disabled api_extensions ${DISABLE_VOLUME_API_EXTENSIONS}
     if ! is_service_enabled c-bak; then
         iniset $TEMPEST_CONFIG volume-feature-enabled backup False
     fi
-    CINDER_MULTI_LVM_BACKEND=$(trueorfalse False $CINDER_MULTI_LVM_BACKEND)
-    if [ $CINDER_MULTI_LVM_BACKEND == "True" ]; then
+
+    # Using CINDER_ENABLED_BACKENDS
+    if [[ -n "$CINDER_ENABLED_BACKENDS" ]] && [[ $CINDER_ENABLED_BACKENDS =~ .*,.* ]]; then
         iniset $TEMPEST_CONFIG volume-feature-enabled multi_backend "True"
-        iniset $TEMPEST_CONFIG volume backend1_name "LVM_iSCSI"
-        iniset $TEMPEST_CONFIG volume backend2_name "LVM_iSCSI_2"
+        local i=1
+        local be
+        for be in ${CINDER_ENABLED_BACKENDS//,/ }; do
+            local be_name=${be##*:}
+            iniset $TEMPEST_CONFIG volume "backend${i}_name" "$be_name"
+            i=$(( i + 1 ))
+        done
     fi
 
-    if [ $TEMPEST_VOLUME_DRIVER != "default" ]; then
+    if [ $TEMPEST_VOLUME_DRIVER != "default" -o \
+        "$TEMPEST_VOLUME_VENDOR" != "$TEMPEST_DEFAULT_VOLUME_VENDOR" ]; then
         iniset $TEMPEST_CONFIG volume vendor_name "$TEMPEST_VOLUME_VENDOR"
+    fi
+    if [ $TEMPEST_VOLUME_DRIVER != "default" -o \
+        $TEMPEST_STORAGE_PROTOCOL != $TEMPEST_DEFAULT_STORAGE_PROTOCOL ]; then
         iniset $TEMPEST_CONFIG volume storage_protocol $TEMPEST_STORAGE_PROTOCOL
     fi
 
@@ -370,9 +393,6 @@ function configure_tempest {
 
     # cli
     iniset $TEMPEST_CONFIG cli cli_dir $NOVA_BIN_DIR
-
-    # Networking
-    iniset $TEMPEST_CONFIG network-feature-enabled api_extensions "${NETWORK_API_EXTENSIONS:-all}"
 
     # Baremetal
     if [ "$VIRT_DRIVER" = "ironic" ] ; then
@@ -419,8 +439,15 @@ function create_tempest_accounts {
     fi
 }
 
+# install_tempest_lib() - Collect source, prepare, and install tempest-lib
+function install_tempest_lib {
+    git_clone $TEMPEST_LIB_REPO $TEMPEST_LIB_DIR $TEMPEST_LIB_BRANCH
+    setup_develop $TEMPEST_LIB_DIR
+}
+
 # install_tempest() - Collect source and prepare
 function install_tempest {
+    install_tempest_lib
     git_clone $TEMPEST_REPO $TEMPEST_DIR $TEMPEST_BRANCH
     pip_install tox
 }
@@ -437,6 +464,7 @@ function init_tempest {
     if [ -f "$kernel" -a -f "$ramdisk" -a -f "$disk_image" -a  "$VIRT_DRIVER" != "openvz" \
         -a \( "$LIBVIRT_TYPE" != "lxc" -o "$VIRT_DRIVER" != "libvirt" \) ]; then
         echo "Prepare aki/ari/ami Images"
+        mkdir -p $BOTO_MATERIALS_PATH
         ( #new namespace
             # tenant:demo ; user: demo
             source $TOP_DIR/accrc/demo/demo

@@ -74,6 +74,7 @@ EOF
 apt-get update
 apt-get install -y cracklib-runtime curl wget ssh openssh-server tcpdump ethtool
 apt-get install -y curl wget ssh openssh-server python-pip git sudo python-netaddr
+apt-get install -y coreutils
 pip install xenapi
 
 # Install XenServer guest utilities
@@ -113,7 +114,6 @@ function setup_vimrc {
     if [ ! -e $1 ]; then
         # Simple but usable vimrc
         cat > $1 <<EOF
-syntax on
 se ts=4
 se expandtab
 se shiftwidth=4

@@ -128,12 +128,7 @@ function configure_trove {
     cp $TROVE_LOCAL_CONF_DIR/api-paste.ini $TROVE_CONF_DIR/api-paste.ini
     TROVE_API_PASTE_INI=$TROVE_CONF_DIR/api-paste.ini
 
-    iniset $TROVE_API_PASTE_INI filter:authtoken identity_uri $KEYSTONE_AUTH_URI
-    iniset $TROVE_API_PASTE_INI filter:authtoken cafile $KEYSTONE_SSL_CA
-    iniset $TROVE_API_PASTE_INI filter:authtoken admin_tenant_name $SERVICE_TENANT_NAME
-    iniset $TROVE_API_PASTE_INI filter:authtoken admin_user trove
-    iniset $TROVE_API_PASTE_INI filter:authtoken admin_password $SERVICE_PASSWORD
-    iniset $TROVE_API_PASTE_INI filter:authtoken signing_dir $TROVE_AUTH_CACHE_DIR
+    configure_auth_token_middleware $TROVE_API_PASTE_INI trove $TROVE_AUTH_CACHE_DIR filter:authtoken
 
     # (Re)create trove conf files
     rm -f $TROVE_CONF_DIR/trove.conf
@@ -144,6 +139,8 @@ function configure_trove {
     iniset $TROVE_CONF_DIR/trove.conf DEFAULT sql_connection `database_connection_url trove`
     iniset $TROVE_CONF_DIR/trove.conf DEFAULT default_datastore $TROVE_DATASTORE_TYPE
     setup_trove_logging $TROVE_CONF_DIR/trove.conf
+    iniset $TROVE_CONF_DIR/trove.conf DEFAULT trove_api_workers "$API_WORKERS"
+
 
     # (Re)create trove taskmanager conf file if needed
     if is_service_enabled tr-tmgr; then
@@ -228,9 +225,9 @@ function init_trove {
 
 # start_trove() - Start running processes, including screen
 function start_trove {
-    screen_it tr-api "cd $TROVE_DIR; $TROVE_BIN_DIR/trove-api --config-file=$TROVE_CONF_DIR/trove.conf --debug 2>&1"
-    screen_it tr-tmgr "cd $TROVE_DIR; $TROVE_BIN_DIR/trove-taskmanager --config-file=$TROVE_CONF_DIR/trove-taskmanager.conf --debug 2>&1"
-    screen_it tr-cond "cd $TROVE_DIR; $TROVE_BIN_DIR/trove-conductor --config-file=$TROVE_CONF_DIR/trove-conductor.conf --debug 2>&1"
+    run_process tr-api "$TROVE_BIN_DIR/trove-api --config-file=$TROVE_CONF_DIR/trove.conf --debug"
+    run_process tr-tmgr "$TROVE_BIN_DIR/trove-taskmanager --config-file=$TROVE_CONF_DIR/trove-taskmanager.conf --debug"
+    run_process tr-cond "$TROVE_BIN_DIR/trove-conductor --config-file=$TROVE_CONF_DIR/trove-conductor.conf --debug"
 }
 
 # stop_trove() - Stop running processes
@@ -238,7 +235,7 @@ function stop_trove {
     # Kill the trove screen windows
     local serv
     for serv in tr-api tr-tmgr tr-cond; do
-        screen_stop $serv
+        stop_process $serv
     done
 }
 

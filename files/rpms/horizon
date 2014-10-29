@@ -4,13 +4,11 @@ mod_wsgi  # NOPRIME
 pylint
 python-anyjson
 python-BeautifulSoup
-python-boto
 python-coverage
 python-dateutil
 python-eventlet
 python-greenlet
 python-httplib2
-python-kombu
 python-migrate
 python-mox
 python-nose

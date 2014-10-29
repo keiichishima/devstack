@@ -171,6 +171,7 @@ function wait_for_VM_to_halt {
     echo "Waiting for the VM to halt.  Progress in-VM can be checked with vncviewer:"
     mgmt_ip=$(echo $XENAPI_CONNECTION_URL | tr -d -c '1234567890.')
     domid=$(get_domid "$GUEST_NAME")
+    sleep 20 # Wait for the vnc-port to be written
     port=$(xenstore-read /local/domain/$domid/console/vnc-port)
     echo "vncviewer -via root@$mgmt_ip localhost:${port:2}"
     while true; do
@@ -241,6 +242,11 @@ else
     # Template already installed, create VM from template
     #
     vm_uuid=$(xe vm-install template="$TNAME" new-name-label="$GUEST_NAME")
+fi
+
+if [ -n "${EXIT_AFTER_JEOS_INSTALLATION:-}" ]; then
+    echo "User requested to quit after JEOS instalation"
+    exit 0
 fi
 
 #
@@ -393,7 +399,7 @@ if [ "$WAIT_TILL_LAUNCH" = "1" ]  && [ -e ~/.ssh/id_rsa.pub  ] && [ "$COPYENV" =
 
     # Watch devstack's output (which doesn't start until stack.sh is running,
     # but wait for run.sh (which starts stack.sh) to exit as that is what
-    # hopefully writes the succeded cookie.
+    # hopefully writes the succeeded cookie.
     pid=`ssh_no_check -q stack@$OS_VM_MANAGEMENT_ADDRESS pgrep run.sh`
     ssh_no_check -q stack@$OS_VM_MANAGEMENT_ADDRESS "tail --pid $pid -n +1 -f /tmp/devstack/log/stack.log"
 
