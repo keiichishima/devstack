@@ -1,13 +1,6 @@
-`DevStack </>`__
-
--  `Overview <../overview.html>`__
--  `Changes <../changes.html>`__
--  `FAQ <../faq.html>`__
--  `git.openstack.org <https://git.openstack.org/cgit/openstack-dev/devstack>`__
--  `Gerrit <https://review.openstack.org/#/q/status:open+project:openstack-dev/devstack,n,z>`__
-
-All-In-One: Dedicated Hardware
-==============================
+=========================
+All-In-One Single Machine
+=========================
 
 Things are about to get real! Using OpenStack in containers or VMs is
 nice for kicking the tires, but doesn't compare to the feeling you get
@@ -24,9 +17,9 @@ download the `Minimal
 CD <https://help.ubuntu.com/community/Installation/MinimalCD>`__ for
 Ubuntu releases since DevStack will download & install all the
 additional dependencies. The netinstall ISO is available for
-`Fedora <http://mirrors.kernel.org/fedora/releases/18/Fedora/x86_64/iso/Fedora-20-x86_64-netinst.iso>`__
+`Fedora <http://mirrors.kernel.org/fedora/releases/>`__
 and
-`CentOS/RHEL <http://mirrors.kernel.org/centos/6.5/isos/x86_64/CentOS-6.5-x86_64-netinstall.iso>`__.
+`CentOS/RHEL <http://mirrors.kernel.org/centos/>`__.
 You may be tempted to use a desktop distro on a laptop, it will probably
 work but you may need to tell Network Manager to keep its fingers off
 the interface(s) that OpenStack uses for bridging.

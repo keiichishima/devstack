@@ -1,13 +1,6 @@
-`DevStack </>`__
-
--  `Overview <overview.html>`__
--  `Changes <changes.html>`__
--  `FAQ <faq.html>`__
--  `git.openstack.org <https://git.openstack.org/cgit/openstack-dev/devstack>`__
--  `Gerrit <https://review.openstack.org/#/q/status:open+project:openstack-dev/devstack,n,z>`__
-
-Configuration Making it go my way
----------------------------------
+=============
+Configuration
+=============
 
 DevStack has always tried to be mostly-functional with a minimal amount
 of configuration. The number of options has ballooned as projects add
@@ -81,7 +74,7 @@ A specific meta-section ``local|localrc`` is used to provide a default
 ``localrc`` file (actually ``.localrc.auto``). This allows all custom
 settings for DevStack to be contained in a single file. If ``localrc``
 exists it will be used instead to preserve backward-compatibility. More
-details on the `contents of localrc <localrc.html>`__ are available.
+details on the :doc:`contents of local.conf <local.conf>` are available.
 
 ::
 

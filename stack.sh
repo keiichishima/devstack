@@ -90,16 +90,6 @@ source $TOP_DIR/lib/config
 # and ``DISTRO``
 GetDistro
 
-# Warn users who aren't on an explicitly supported distro, but allow them to
-# override check and attempt installation with ``FORCE=yes ./stack``
-if [[ ! ${DISTRO} =~ (precise|trusty|7.0|wheezy|sid|testing|jessie|f19|f20|rhel6|rhel7) ]]; then
-    echo "WARNING: this script has not been tested on $DISTRO"
-    if [[ "$FORCE" != "yes" ]]; then
-        die $LINENO "If you wish to run this script anyway run with FORCE=yes"
-    fi
-fi
-
-
 # Global Settings
 # ---------------
 
@@ -150,6 +140,15 @@ if [[ ! -r $TOP_DIR/stackrc ]]; then
     die $LINENO "missing $TOP_DIR/stackrc - did you grab more than just stack.sh?"
 fi
 source $TOP_DIR/stackrc
+
+# Warn users who aren't on an explicitly supported distro, but allow them to
+# override check and attempt installation with ``FORCE=yes ./stack``
+if [[ ! ${DISTRO} =~ (precise|trusty|7.0|wheezy|sid|testing|jessie|f19|f20|f21|rhel6|rhel7) ]]; then
+    echo "WARNING: this script has not been tested on $DISTRO"
+    if [[ "$FORCE" != "yes" ]]; then
+        die $LINENO "If you wish to run this script anyway run with FORCE=yes"
+    fi
+fi
 
 # Check to see if we are already running DevStack
 # Note that this may fail if USE_SCREEN=False
@@ -585,7 +584,7 @@ if [[ -d $TOP_DIR/extras.d ]]; then
 fi
 
 # Set the destination directories for other OpenStack projects
-OPENSTACKCLIENT_DIR=$DEST/python-openstackclient
+GITDIR["python-openstackclient"]=$DEST/python-openstackclient
 
 # Interactive Configuration
 # -------------------------
@@ -788,8 +787,14 @@ fi
 # Install middleware
 install_keystonemiddleware
 
-git_clone $OPENSTACKCLIENT_REPO $OPENSTACKCLIENT_DIR $OPENSTACKCLIENT_BRANCH
-setup_develop $OPENSTACKCLIENT_DIR
+# install the OpenStack client, needed for most setup commands
+if use_library_from_git "python-openstackclient"; then
+    git_clone_by_name "python-openstackclient"
+    setup_dev_lib "python-openstackclient"
+else
+    pip_install python-openstackclient
+fi
+
 
 if is_service_enabled key; then
     if [ "$KEYSTONE_AUTH_HOST" == "$SERVICE_HOST" ]; then
@@ -1275,7 +1280,7 @@ if is_service_enabled neutron; then
     start_neutron_agents
 fi
 # Once neutron agents are started setup initial network elements
-if is_service_enabled q-svc; then
+if is_service_enabled q-svc && [[ "$NEUTRON_CREATE_INITIAL_NETWORKS" == "True" ]]; then
     echo_summary "Creating initial neutron network elements"
     create_neutron_initial_network
     setup_neutron_debug

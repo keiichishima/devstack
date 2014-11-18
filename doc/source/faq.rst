@@ -1,13 +1,6 @@
-`DevStack </>`__
-
--  `Overview <overview.html>`__
--  `Changes <changes.html>`__
--  `FAQ <faq.html>`__
--  `git.openstack.org <https://git.openstack.org/cgit/openstack-dev/devstack>`__
--  `Gerrit <https://review.openstack.org/#/q/status:open+project:openstack-dev/devstack,n,z>`__
-
-FAQ: Using DevStack Making to behave
-------------------------------------
+===
+FAQ
+===
 
 -  `General Questions <#general>`__
 -  `Operation and Configuration <#ops_conf>`__
@@ -54,11 +47,8 @@ Q: I'd like to help!
     and bug reports go to
     `LaunchPad <http://bugs.launchpad.net/devstack/>`__. Contributions
     follow the usual process as described in the `OpenStack
-    wiki <http://wiki.openstack.org/HowToContribute>`__ even though
-    DevStack is not an official OpenStack project. This site is housed
-    in the CloudBuilder's
-    `github <http://github.com/cloudbuilders/devstack>`__ in the
-    gh-pages branch.
+    wiki <http://wiki.openstack.org/HowToContribute>`__. This Sphinx
+    documentation is housed in the doc directory.
 Q: Why not use packages?
     A: Unlike packages, DevStack leaves your cloud ready to develop -
     checkouts of the code and services running in screen. However, many

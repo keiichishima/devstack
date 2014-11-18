@@ -1,13 +1,6 @@
-`DevStack </>`__
-
--  `Overview <overview.html>`__
--  `Changes <changes.html>`__
--  `FAQ <faq.html>`__
--  `git.openstack.org <https://git.openstack.org/cgit/openstack-dev/devstack>`__
--  `Gerrit <https://review.openstack.org/#/q/status:open+project:openstack-dev/devstack,n,z>`__
-
-stackrc DevStack settings
--------------------------
+===========================
+stackrc - DevStack Settings
+===========================
 
 ``stackrc`` is the primary configuration file for DevStack. It contains
 all of the settings that control the services started and the
@@ -22,12 +15,12 @@ ENABLED\_SERVICES
     Specify which services to launch. These generally correspond to
     screen tabs. The default includes: Glance (API and Registry),
     Keystone, Nova (API, Certificate, Object Store, Compute, Network,
-    Scheduler, VNC proxies, Certificate Authentication), Cinder
+    Scheduler, Certificate Authentication), Cinder
     (Scheduler, API, Volume), Horizon, MySQL, RabbitMQ, Tempest.
 
     ::
 
-        ENABLED_SERVICES=g-api,g-reg,key,n-api,n-crt,n-obj,n-cpu,n-net,n-cond,cinder,c-sch,c-api,c-vol,n-sch,n-novnc,n-xvnc,n-cauth,horizon,rabbit,tempest,$DATABASE_TYPE
+        ENABLED_SERVICES=g-api,g-reg,key,n-api,n-crt,n-obj,n-cpu,n-net,n-cond,c-sch,c-api,c-vol,n-sch,n-cauth,horizon,rabbit,tempest,$DATABASE_TYPE
 
     Other services that are not enabled by default can be enabled in
     ``localrc``. For example, to add Swift, use the following service
